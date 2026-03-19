@@ -279,4 +279,112 @@ def update_seller(seller_id: str, req: SellerUpdate):
     result = supabase.table("sellers").update(update).eq("id", seller_id).execute()
     return {"seller": result.data[0]}
 
-    
+
+# ── CHAT ENDPOINTS ─────────────────────────────────────────────────────────────
+
+class MessageRequest(BaseModel):
+    conversation_id: str
+    sender: str
+    sender_name: str
+    content: str
+    message_type: str = "text"
+    file_url: str = ""
+    file_name: str = ""
+
+class ConversationRequest(BaseModel):
+    buyer_name: str
+    buyer_phone: str
+    seller_id: str
+
+@app.post("/conversations/start")
+def start_conversation(req: ConversationRequest):
+    """Start or get existing conversation between buyer and seller"""
+    # Check if conversation already exists
+    existing = supabase.table("conversations")\
+        .select("*")\
+        .eq("buyer_phone", req.buyer_phone)\
+        .eq("seller_id", req.seller_id)\
+        .execute()
+
+    if existing.data:
+        return {"conversation": existing.data[0]}
+
+    # Create new conversation
+    result = supabase.table("conversations").insert({
+        "buyer_name": req.buyer_name,
+        "buyer_phone": req.buyer_phone,
+        "seller_id": req.seller_id,
+        "last_message": "Conversation started",
+        "unread_seller": 1,
+    }).execute()
+
+    return {"conversation": result.data[0]}
+
+@app.get("/conversations/buyer/{phone}")
+def get_buyer_conversations(phone: str):
+    """Get all conversations for a buyer"""
+    result = supabase.table("conversations")\
+        .select("*, sellers(name, city, category, trust_score)")\
+        .eq("buyer_phone", phone)\
+        .order("last_message_at", desc=True)\
+        .execute()
+    return {"conversations": result.data}
+
+@app.get("/conversations/seller/{seller_id}")
+def get_seller_conversations(seller_id: str):
+    """Get all conversations for a seller"""
+    result = supabase.table("conversations")\
+        .select("*")\
+        .eq("seller_id", seller_id)\
+        .order("last_message_at", desc=True)\
+        .execute()
+    return {"conversations": result.data}
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_messages(conversation_id: str):
+    """Get all messages in a conversation"""
+    result = supabase.table("messages")\
+        .select("*")\
+        .eq("conversation_id", conversation_id)\
+        .order("created_at", asc=True)\
+        .execute()
+    return {"messages": result.data}
+
+@app.post("/messages/send")
+def send_message(req: MessageRequest):
+    """Send a message"""
+    result = supabase.table("messages").insert({
+        "conversation_id": req.conversation_id,
+        "sender": req.sender,
+        "sender_name": req.sender_name,
+        "content": req.content,
+        "message_type": req.message_type,
+        "file_url": req.file_url,
+        "file_name": req.file_name,
+    }).execute()
+
+    # Update conversation last message
+    supabase.table("conversations").update({
+        "last_message": req.content if req.message_type == "text" else f"📎 {req.file_name or 'File'}",
+        "last_message_at": "now()",
+        "unread_seller": supabase.table("conversations").select("unread_seller").eq("id", req.conversation_id).execute().data[0]["unread_seller"] + (1 if req.sender == "buyer" else 0),
+    }).eq("id", req.conversation_id).execute()
+
+    return {"message": result.data[0]}
+
+@app.post("/chat/upload")
+async def upload_chat_file(
+    file: UploadFile = File(...),
+    conversation_id: str = Form(...)
+):
+    """Upload photo or file to chat"""
+    content = await file.read()
+    file_path = f"{conversation_id}/{file.filename}"
+
+    result = supabase.storage.from_("chat-files").upload(
+        file_path, content,
+        {"content-type": file.content_type}
+    )
+
+    url = supabase.storage.from_("chat-files").get_public_url(file_path)
+    return {"url": url, "file_name": file.filename}    
