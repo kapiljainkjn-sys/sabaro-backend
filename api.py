@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
 from openai import OpenAI
+import PyPDF2
+import io
+import json
 
 load_dotenv()
 
@@ -387,4 +390,51 @@ async def upload_chat_file(
     )
 
     url = supabase.storage.from_("chat-files").get_public_url(file_path)
-    return {"url": url, "file_name": file.filename}    
+    return {"url": url, "file_name": file.filename} 
+@app.post("/sellers/{seller_id}/catalogue")
+async def upload_catalogue(seller_id: str, file: UploadFile = File(...)):
+    content = await file.read()
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
+        full_text = ""
+        for page in pdf_reader.pages:
+            full_text += page.extract_text() + "\n"
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {str(e)}")
+
+    if not full_text.strip():
+        raise HTTPException(status_code=400, detail="No text found in PDF.")
+
+    extraction = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role":"system","content":"Extract products from catalogue. Return only JSON with key 'products' as array."},
+            {"role":"user","content":f"Extract all products with fields: product_name, description, material, use_cases, min_order (number), price_per_unit (number).\n\nCatalogue:\n{full_text[:6000]}\n\nReturn only JSON: {{\"products\": [...]}}"}
+        ],
+        response_format={"type":"json_object"}
+    )
+
+    parsed = json.loads(extraction.choices[0].message.content)
+    products = parsed.get("products", [])
+
+    added = []
+    for product in products[:30]:
+        try:
+            text = f"{product.get('product_name','')} {product.get('description','')} {product.get('material','')} {product.get('use_cases','')}"
+            vector = embed(text)
+            result = supabase.table("products").insert({
+                "seller_id": seller_id,
+                "product_name": product.get("product_name",""),
+                "description": product.get("description",""),
+                "material": product.get("material",""),
+                "use_cases": product.get("use_cases",""),
+                "min_order": int(product.get("min_order") or 0),
+                "price_per_unit": float(product.get("price_per_unit") or 0),
+                "embedding": vector,
+            }).execute()
+            added.append(result.data[0])
+        except Exception as e:
+            print(f"Product error: {e}")
+            continue
+
+    return {"products": added, "products_added": len(added)}    
