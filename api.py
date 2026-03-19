@@ -149,3 +149,71 @@ def create_booking(req: BookingRequest):
         "status": "pending",
         "message": "Booking created. Seller will confirm within 24 hours."
     }
+
+class SellerRegister(BaseModel):
+    name: str
+    category: str
+    city: str
+    area: str
+    whatsapp: str
+    since: int
+    price_range: str
+    moq: str
+    password: str
+
+@app.post("/sellers/register")
+def register_seller(req: SellerRegister):
+    """Register a new seller"""
+
+    # Check if seller with same WhatsApp already exists
+    existing = supabase.table("sellers").select("id").eq("whatsapp", req.whatsapp).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="Seller with this WhatsApp already registered.")
+
+    # Add seller
+    result = supabase.table("sellers").insert({
+        "name": req.name,
+        "category": req.category,
+        "city": req.city,
+        "area": req.area,
+        "whatsapp": req.whatsapp,
+        "since": req.since,
+        "price_range": req.price_range,
+        "moq": req.moq,
+        "trust_score": 40,
+        "shipments": 0,
+        "recommendations": 0,
+        "sample_available": False,
+        "inspection_available": False,
+        "transport_available": False,
+    }).execute()
+
+    seller_id = result.data[0]["id"]
+    return {
+        "seller_id": seller_id,
+        "message": "Registration successful",
+        "name": req.name
+    }
+
+
+@app.get("/sellers/{seller_id}/dashboard")
+def seller_dashboard(seller_id: str):
+    """Get seller dashboard data"""
+    seller = supabase.table("sellers").select("*").eq("id", seller_id).execute()
+    bookings = supabase.table("bookings").select("*").eq("seller_id", seller_id).execute()
+    products = supabase.table("products").select("*").eq("seller_id", seller_id).execute()
+
+    if not seller.data:
+        raise HTTPException(status_code=404, detail="Seller not found")
+
+    return {
+        "seller": seller.data[0],
+        "bookings": bookings.data,
+        "products": products.data,
+        "stats": {
+            "total_bookings": len(bookings.data),
+            "pending_bookings": len([b for b in bookings.data if b["status"] == "pending"]),
+            "total_products": len(products.data),
+        }
+    }
+
