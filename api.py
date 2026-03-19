@@ -217,3 +217,66 @@ def seller_dashboard(seller_id: str):
         }
     }
 
+
+# Seller login
+class SellerLogin(BaseModel):
+    whatsapp: str
+    password: str
+
+@app.post("/sellers/login")
+def login_seller(req: SellerLogin):
+    result = supabase.table("sellers").select("*").eq("whatsapp", req.whatsapp).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="No seller found with this WhatsApp number.")
+    return {"seller": result.data[0]}
+
+# Add product with embedding
+class ProductAdd(BaseModel):
+    product_name: str = ""
+    name: str = ""
+    description: str = ""
+    material: str = ""
+    use_cases: str = ""
+    min_order: int = 0
+    price_per_unit: float = 0
+
+@app.post("/sellers/{seller_id}/products")
+def add_product(seller_id: str, req: ProductAdd):
+    name = req.product_name or req.name
+    text = f"Product: {name} Description: {req.description} Material: {req.material} Use cases: {req.use_cases}"
+    vector = embed(text)
+    result = supabase.table("products").insert({
+        "seller_id": seller_id,
+        "product_name": name,
+        "description": req.description,
+        "material": req.material,
+        "use_cases": req.use_cases,
+        "min_order": req.min_order,
+        "price_per_unit": req.price_per_unit,
+        "embedding": vector,
+    }).execute()
+    return {"product": result.data[0]}
+
+# Confirm booking
+@app.post("/bookings/{booking_id}/confirm")
+def confirm_booking(booking_id: str):
+    result = supabase.table("bookings").update({"status": "confirmed"}).eq("id", booking_id).execute()
+    return {"status": "confirmed"}
+
+# Update seller profile
+class SellerUpdate(BaseModel):
+    name: str = None
+    category: str = None
+    city: str = None
+    area: str = None
+    whatsapp: str = None
+    price_range: str = None
+    moq: str = None
+
+@app.patch("/sellers/{seller_id}")
+def update_seller(seller_id: str, req: SellerUpdate):
+    update = {k:v for k,v in req.dict().items() if v is not None}
+    result = supabase.table("sellers").update(update).eq("id", seller_id).execute()
+    return {"seller": result.data[0]}
+
+    
