@@ -4,3 +4,5 @@ supabase
 openai
 python-dotenv
 pydantic
+pypdf2
+python-multipart
