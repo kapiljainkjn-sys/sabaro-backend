@@ -113,14 +113,14 @@ def search(req: SearchRequest):
 async def upload_catalogue(seller_id: str, file: UploadFile = File(...)):
     content = await file.read()
     try:
-       pdf_reader = pypdf.PdfReader(io.BytesIO(content))
-     full_text = ""
-    for i, page in enumerate(pdf_reader.pages):
-        if len(full_text) > 8000:
-            break
-        text = page.extract_text()
-        if text:
-            full_text += text + "\n"
+        pdf_reader = pypdf.PdfReader(io.BytesIO(content))
+        full_text = ""
+        for i, page in enumerate(pdf_reader.pages):
+            if len(full_text) > 8000:
+                break
+            text = page.extract_text()
+            if text:
+                full_text += text + "\n"
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read PDF: {str(e)}")
 
