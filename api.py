@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
 from openai import OpenAI
-import pypdf2
+import pypdf
 import io
 import json
 
@@ -395,9 +395,9 @@ async def upload_chat_file(
 async def upload_catalogue(seller_id: str, file: UploadFile = File(...)):
     content = await file.read()
     try:
-        pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
-        full_text = ""
-        for page in pdf_reader.pages:
+        pdf_reader = pypdf.PdfReader(io.BytesIO(content))
+            full_text = ""
+            for page in pdf_reader.pages:
             full_text += page.extract_text() + "\n"
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read PDF: {str(e)}")
