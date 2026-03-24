@@ -109,6 +109,8 @@ def search(req: SearchRequest):
         "sellers": ranked[:req.limit]
     }
 
+
+
 @app.post("/sellers/{seller_id}/catalogue")
 async def upload_catalogue(
     seller_id: str,
@@ -120,7 +122,7 @@ async def upload_catalogue(
         pdf_reader = pypdf.PdfReader(io.BytesIO(content))
         full_text = ""
         for i, page in enumerate(pdf_reader.pages):
-            if len(full_text) > 8000:
+            if i > 60:
                 break
             text = page.extract_text()
             if text:
@@ -204,12 +206,12 @@ IF Gems/Jewellery:
 Use empty string for basic fields not found. Only add tags actually mentioned in catalogue. Never invent values.
 
 Catalogue text:
-{full_text[:7000]}
+{full_text[:10000]}
 
 Return only JSON: {{"industry_detected": "...", "products": [...]}}
 Tags format: [{{"key": "gsm", "value": "350"}}, {{"key": "color", "value": "white"}}]"""}
         ],
-        response_format={"type":"json_object"}
+        response_format={{"type":"json_object"}}
     )
 
     parsed = json.loads(extraction.choices[0].message.content)
@@ -222,7 +224,7 @@ Tags format: [{{"key": "gsm", "value": "350"}}, {{"key": "color", "value": "whit
     try:
         pdf_reader2 = pypdf.PdfReader(io.BytesIO(content))
         for page_num, page in enumerate(pdf_reader2.pages):
-            if len(extracted_images) >= 30:
+            if len(extracted_images) >= 50:
                 break
             if "/Resources" in page and "/XObject" in page["/Resources"]:
                 xobjects = page["/Resources"]["/XObject"].get_object()
@@ -245,7 +247,7 @@ Tags format: [{{"key": "gsm", "value": "350"}}, {{"key": "color", "value": "whit
         print(f"Image extraction failed: {e}")
 
     added = []
-    for i, product in enumerate(products[:30]):
+    for i, product in enumerate(products[:50]):
         try:
             tags = product.get("tags", [])
             tags_text = " ".join([f"{t.get('key','')} {t.get('value','')}" for t in tags])
@@ -268,7 +270,14 @@ Certifications: {product.get('certifications','')}
 {tags_text}
 """
             vector = embed(embed_text)
-            image_url = extracted_images[i] if i < len(extracted_images) else None
+
+            # Use extracted image or fallback to Unsplash
+            if i < len(extracted_images):
+                image_url = extracted_images[i]
+            else:
+                name = product.get('product_name','').replace(' ','+')
+                cat = product.get('category','').replace(' ','+')
+                image_url = f"https://source.unsplash.com/400x300/?{name},{cat}"
 
             result = supabase.table("products").insert({
                 "seller_id": seller_id,
@@ -299,8 +308,7 @@ Certifications: {product.get('certifications','')}
             print(f"Product error: {e}")
             continue
 
-    return {"products": added, "products_added": len(added)}   
-
+    return {"products": added, "products_added": len(added)}
 
 
 
