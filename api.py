@@ -211,7 +211,7 @@ Catalogue text:
 Return only JSON: {{"industry_detected": "...", "products": [...]}}
 Tags format: [{{"key": "gsm", "value": "350"}}, {{"key": "color", "value": "white"}}]"""}
         ],
-        response_format={{"type":"json_object"}}
+        response_format={"type":"json_object"}
     )
 
     parsed = json.loads(extraction.choices[0].message.content)
