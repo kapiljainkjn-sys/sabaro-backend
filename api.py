@@ -110,7 +110,11 @@ def search(req: SearchRequest):
     }
 
 @app.post("/sellers/{seller_id}/catalogue")
-async def upload_catalogue(seller_id: str, file: UploadFile = File(...)):
+async def upload_catalogue(
+    seller_id: str,
+    file: UploadFile = File(...),
+    industry: str = Form("")
+):
     content = await file.read()
     try:
         pdf_reader = pypdf.PdfReader(io.BytesIO(content))
@@ -127,31 +131,167 @@ async def upload_catalogue(seller_id: str, file: UploadFile = File(...)):
     if not full_text.strip():
         raise HTTPException(status_code=400, detail="No text found in PDF.")
 
+    industry_context = f"This is a {industry} catalogue." if industry else ""
+
     extraction = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role":"system","content":"Extract products from catalogue. Return only JSON with key 'products' as array."},
-            {"role":"user","content":f"Extract all products with fields: product_name, description, material, use_cases, min_order (number), price_per_unit (number).\n\nCatalogue:\n{full_text[:6000]}\n\nReturn only JSON: {{\"products\": [...]}}"}
+            {"role":"system","content":"You are a B2B product data extractor for Indian suppliers. Extract structured product data accurately."},
+            {"role":"user","content":f"""{industry_context}
+
+STEP 1 — Identify the industry from: Chemicals/Dyes/Solvents, Pharmaceuticals/Medical, Metals/Engineering/Auto Parts, Electronics/Electrical, Construction/Building Materials, Textiles/Apparel/Leather, Food/Beverage/Agriculture, Packaging/Paper/Printing, Plastics/Rubber, Furniture/Hotel Supplies, Industrial Machinery, Gems/Jewellery, Other.
+
+STEP 2 — Extract ALL products. Never skip any product.
+
+BASIC FIELDS (extract for every product):
+- product_name: full product name
+- product_code: SKU, model number, catalogue code, item code
+- brand: brand or manufacturer name
+- series_name: product series or range name
+- category: specific category (e.g. Corrugated Box, Vitrified Tile, Cotton Fabric)
+- industry: from STEP 1
+- description: 2-3 sentences — what it is and key benefit
+- material: primary material or composition
+- color: color or shade
+- dimensions: size, dimensions, capacity
+- finish_grade: finish, grade, purity (e.g. Glossy, Grade A, 99.9% pure, 350 GSM)
+- use_cases: comma separated applications
+- suitable_for: who uses it (e.g. restaurants, factories, hospitals)
+- certifications: ISO/BIS/FSSAI/CE/RoHS/REACH/FDA/Agmark etc
+- country_of_origin: country of manufacture
+- unit_of_measure: piece/kg/litre/metre/sq ft/box/roll/set/ton/dozen
+- min_order: number (0 if unknown)
+- price_per_unit: number (0 if unknown)
+
+EXTENDED FIELDS — put into tags array as [{{"key":"...","value":"..."}}]:
+
+IF Chemicals/Dyes/Solvents:
+  chemical_formula, cas_number, concentration, ph_level, flash_point, boiling_point, specific_gravity, hazard_class, purity_percentage, shelf_life, storage_conditions
+
+IF Pharmaceuticals/Medical:
+  active_ingredient, dosage_form, strength, storage_temp, shelf_life, schedule_class, packaging_type, sterile
+
+IF Metals/Engineering/Auto Parts:
+  alloy_grade, hardness_hrc, tensile_strength, yield_strength, tolerance, surface_finish, heat_treatment, weight_per_unit, operating_pressure, thread_type, vehicle_make, vehicle_model
+
+IF Electronics/Electrical:
+  voltage, wattage, current_rating, frequency, ip_rating, operating_temp, connector_type, efficiency_rating, warranty_years, power_factor, phase
+
+IF Construction/Building Materials:
+  thickness, water_absorption, slip_resistance, load_capacity, compressive_strength, fire_rating, thermal_insulation, installation_method, coverage_per_unit
+
+IF Textiles/Apparel/Leather:
+  fabric_type, gsm, weave_type, thread_count, width_cm, shrinkage_percent, color_fastness, care_instructions, pattern_type, blend_ratio
+
+IF Food/Beverage/Agriculture:
+  ingredients, shelf_life, storage_conditions, fssai_number, organic_certified, food_grade, allergens, moisture_content, net_weight, variety_strain
+
+IF Packaging/Paper/Printing:
+  gsm_paper, layers_ply, burst_strength, print_type, recyclable, food_grade_packaging, barrier_properties, moisture_resistance, lamination_type
+
+IF Plastics/Rubber:
+  polymer_type, hardness_shore, elongation_percent, temperature_range, chemical_resistance, uv_stabilized, food_grade_plastic, wall_thickness, pressure_rating
+
+IF Furniture/Hotel Supplies:
+  weight_capacity_kg, assembly_required, room_type, wood_type, upholstery_material, water_resistant, scratch_resistant, stackable, foldable
+
+IF Industrial Machinery:
+  power_kw, capacity_per_hour, working_pressure, noise_level_db, power_supply, cycle_time, accuracy, warranty_machine
+
+IF Gems/Jewellery:
+  metal_purity, carat, stone_type, stone_weight_ct, clarity, cut_grade, hallmark_certified, setting_type
+
+Use empty string for basic fields not found. Only add tags actually mentioned in catalogue. Never invent values.
+
+Catalogue text:
+{full_text[:7000]}
+
+Return only JSON: {{"industry_detected": "...", "products": [...]}}
+Tags format: [{{"key": "gsm", "value": "350"}}, {{"key": "color", "value": "white"}}]"""}
         ],
         response_format={"type":"json_object"}
     )
 
     parsed = json.loads(extraction.choices[0].message.content)
     products = parsed.get("products", [])
+    industry_detected = parsed.get("industry_detected", "")
+    print(f"Industry: {industry_detected}, Products found: {len(products)}")
+
+    # Extract images from PDF
+    extracted_images = []
+    try:
+        pdf_reader2 = pypdf.PdfReader(io.BytesIO(content))
+        for page_num, page in enumerate(pdf_reader2.pages):
+            if len(extracted_images) >= 30:
+                break
+            if "/Resources" in page and "/XObject" in page["/Resources"]:
+                xobjects = page["/Resources"]["/XObject"].get_object()
+                for obj_name, obj in xobjects.items():
+                    obj = obj.get_object()
+                    if obj.get("/Subtype") == "/Image":
+                        try:
+                            data = obj.get_data()
+                            ext = "png" if obj.get("/Filter") == "/FlateDecode" else "jpg"
+                            img_path = f"catalogues/{seller_id}/p{page_num}_{obj_name}.{ext}"
+                            supabase.storage.from_("chat-files").upload(
+                                img_path, data,
+                                {"content-type": f"image/{ext}", "upsert": "true"}
+                            )
+                            url = supabase.storage.from_("chat-files").get_public_url(img_path)
+                            extracted_images.append(url)
+                        except:
+                            continue
+    except Exception as e:
+        print(f"Image extraction failed: {e}")
 
     added = []
-    for product in products[:30]:
+    for i, product in enumerate(products[:30]):
         try:
-            text = f"{product.get('product_name','')} {product.get('description','')} {product.get('material','')} {product.get('use_cases','')}"
-            vector = embed(text)
+            tags = product.get("tags", [])
+            tags_text = " ".join([f"{t.get('key','')} {t.get('value','')}" for t in tags])
+
+            embed_text = f"""
+Product: {product.get('product_name','')}
+Code: {product.get('product_code','')}
+Brand: {product.get('brand','')}
+Series: {product.get('series_name','')}
+Category: {product.get('category','')}
+Industry: {product.get('industry', industry_detected)}
+Description: {product.get('description','')}
+Material: {product.get('material','')}
+Color: {product.get('color','')}
+Dimensions: {product.get('dimensions','')}
+Finish/Grade: {product.get('finish_grade','')}
+Use cases: {product.get('use_cases','')}
+Suitable for: {product.get('suitable_for','')}
+Certifications: {product.get('certifications','')}
+{tags_text}
+"""
+            vector = embed(embed_text)
+            image_url = extracted_images[i] if i < len(extracted_images) else None
+
             result = supabase.table("products").insert({
                 "seller_id": seller_id,
                 "product_name": product.get("product_name",""),
+                "product_code": product.get("product_code",""),
+                "brand": product.get("brand",""),
+                "series_name": product.get("series_name",""),
+                "category": product.get("category",""),
+                "industry": product.get("industry", industry_detected),
                 "description": product.get("description",""),
                 "material": product.get("material",""),
+                "color": product.get("color",""),
+                "dimensions": product.get("dimensions",""),
+                "finish_grade": product.get("finish_grade",""),
                 "use_cases": product.get("use_cases",""),
+                "suitable_for": product.get("suitable_for",""),
+                "certifications": product.get("certifications",""),
+                "country_of_origin": product.get("country_of_origin",""),
+                "unit_of_measure": product.get("unit_of_measure",""),
                 "min_order": int(product.get("min_order") or 0),
                 "price_per_unit": float(product.get("price_per_unit") or 0),
+                "tags": tags,
+                "image_url": image_url,
                 "embedding": vector,
             }).execute()
             added.append(result.data[0])
