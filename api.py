@@ -657,6 +657,122 @@ def team_login(whatsapp: str):
         .eq("whatsapp", whatsapp)\
         .execute()
     if not result.data:
+    raise HTTPException(status_code=404, detail="Not a team member.")
+    return {"member": result.data[0]}
 
+
+@app.post("/team/products")
+def team_add_product(product: dict):
+    """Team adds a product from catalogue review — goes live immediately"""
+    seller_id = product.get("seller_id")
+    catalogue_id = product.get("catalogue_id")
+    tags = product.get("tags", [])
+    tags_text = " ".join([f"{t.get('key','')} {t.get('value','')}" for t in tags])
+    embed_text = f"""
+Product: {product.get('product_name','')}
+Brand: {product.get('brand','')}
+Category: {product.get('category','')}
+Industry: {product.get('industry','')}
+Description: {product.get('description','')}
+Material: {product.get('material','')}
+Color: {product.get('color','')}
+Dimensions: {product.get('dimensions','')}
+Use cases: {product.get('use_cases','')}
+{tags_text}
+"""
+    vector = embed(embed_text)
+    result = supabase.table("products").insert({
+        "seller_id": seller_id,
+        "catalogue_id": catalogue_id,
+        "product_name": product.get("product_name",""),
+        "product_code": product.get("product_code",""),
+        "brand": product.get("brand",""),
+        "series_name": product.get("series_name",""),
+        "category": product.get("category",""),
+        "industry": product.get("industry",""),
+        "description": product.get("description",""),
+        "material": product.get("material",""),
+        "color": product.get("color",""),
+        "dimensions": product.get("dimensions",""),
+        "finish_grade": product.get("finish_grade",""),
+        "use_cases": product.get("use_cases",""),
+        "suitable_for": product.get("suitable_for",""),
+        "certifications": product.get("certifications",""),
+        "country_of_origin": product.get("country_of_origin",""),
+        "unit_of_measure": product.get("unit_of_measure",""),
+        "min_order": int(product.get("min_order") or 0),
+        "price_per_unit": float(product.get("price_per_unit") or 0),
+        "tags": tags,
+        "image_url": product.get("image_url",""),
+        "status": "live",
+        "added_by": product.get("added_by","team"),
+        "embedding": vector,
+    }).execute()
+    if catalogue_id:
+        try:
+            cat = supabase.table("catalogues").select("products_extracted").eq("id", catalogue_id).execute()
+            if cat.data:
+                supabase.table("catalogues").update({
+                    "products_extracted": cat.data[0]["products_extracted"] + 1
+                }).eq("id", catalogue_id).execute()
+        except:
+            pass
+    return {"product": result.data[0]}
+
+
+@app.post("/team/products/temp/image")
+async def upload_temp_image(file: UploadFile = File(...)):
+    """Upload product image from team portal"""
+    content = await file.read()
+    file_path = f"products/temp/{file.filename}"
+    supabase.storage.from_("chat-files").upload(
+        file_path, content,
+        {"content-type": file.content_type, "upsert": "true"}
+    )
+    url = supabase.storage.from_("chat-files").get_public_url(file_path)
+    return {"image_url": url}
+
+
+@app.get("/products/{product_id}")
+def get_product(product_id: str):
+    """Get single product with seller details"""
+    result = supabase.table("products").select(
+        "id, seller_id, product_name, product_code, brand, series_name, category, industry, description, material, color, dimensions, finish_grade, use_cases, suitable_for, certifications, country_of_origin, unit_of_measure, min_order, price_per_unit, tags, image_url, created_at"
+    ).eq("id", product_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Product not found")
+    product = result.data[0]
+    seller = supabase.table("sellers").select(
+        "id, name, category, city, area, trust_score, whatsapp"
+    ).eq("id", product["seller_id"]).execute()
+    return {"product": product, "seller": seller.data[0] if seller.data else {}}
+
+
+@app.patch("/products/{product_id}")
+def update_product(product_id: str, product: dict):
+    """Update product and re-embed"""
+    tags = product.get("tags", [])
+    tags_text = " ".join([f"{t.get('key','')} {t.get('value','')}" for t in tags])
+    text = f"""
+Product: {product.get('product_name','')}
+Brand: {product.get('brand','')}
+Category: {product.get('category','')}
+Industry: {product.get('industry','')}
+Description: {product.get('description','')}
+Material: {product.get('material','')}
+Color: {product.get('color','')}
+Use cases: {product.get('use_cases','')}
+{tags_text}
+"""
+    product["embedding"] = embed(text)
+    result = supabase.table("products").update(product).eq("id", product_id).execute()
+    return {"product": result.data[0]}
+
+
+@app.delete("/products/{product_id}")
+def delete_product(product_id: str):
+    """Delete a product"""
+    supabase.table("products").delete().eq("id", product_id).execute()
+    return {"deleted": True}
 
 
