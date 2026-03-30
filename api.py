@@ -657,7 +657,7 @@ def team_login(whatsapp: str):
         .eq("whatsapp", whatsapp)\
         .execute()
     if not result.data:
-    raise HTTPException(status_code=404, detail="Not a team member.")
+        raise HTTPException(status_code=404, detail="Not a team member.")
     return {"member": result.data[0]}
 
 
