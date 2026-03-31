@@ -347,7 +347,9 @@ async def save_catalogue(
 def get_seller(seller_id: str):
     """Get single seller with their products"""
     seller = supabase.table("sellers").select("*").eq("id", seller_id).execute()
-    products = supabase.table("products").select("*").eq("seller_id", seller_id).execute()
+    products = supabase.table("products").select(
+    "id, seller_id, catalogue_id, product_name, product_code, brand, series_name, category, industry, description, material, color, dimensions, finish_grade, use_cases, suitable_for, certifications, country_of_origin, unit_of_measure, min_order, price_per_unit, tags, image_url, status, added_by, created_at"
+    ).eq("seller_id", seller_id).execute()
 
     if not seller.data:
         return {"error": "Seller not found"}
@@ -437,7 +439,9 @@ def seller_dashboard(seller_id: str):
     """Get seller dashboard data"""
     seller = supabase.table("sellers").select("*").eq("id", seller_id).execute()
     bookings = supabase.table("bookings").select("*").eq("seller_id", seller_id).execute()
-    products = supabase.table("products").select("*").eq("seller_id", seller_id).execute()
+    products = supabase.table("products").select(
+    "id, seller_id, catalogue_id, product_name, product_code, brand, series_name, category, industry, description, material, color, dimensions, finish_grade, use_cases, suitable_for, certifications, country_of_origin, unit_of_measure, min_order, price_per_unit, tags, image_url, status, added_by, created_at"
+    ).eq("seller_id", seller_id).execute()
 
     if not seller.data:
         raise HTTPException(status_code=404, detail="Seller not found")
