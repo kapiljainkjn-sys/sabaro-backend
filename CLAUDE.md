@@ -21,7 +21,7 @@ Tagline: Verified by Proof, Not by Promise.
 - AI embeddings: OpenAI text-embedding-3-small (1536 dimensions)
 - AI extraction: OpenAI GPT-4o-mini
 - PDF reading: pypdf
-- Storage: Supabase Storage (chat-files bucket)
+- Storage: Supabase Storage (chat-files bucket) — RLS policy: allow all on chat-files
 - Payments: Razorpay (mock UI only)
 - Dev: Windows, Python 3.11, Node.js v24, VS Code
 
@@ -30,7 +30,7 @@ Desktop\sabaro-app\src\
   App.jsx              - Buyer marketplace (~1500 lines)
   Seller.jsx           - Seller registration (4-step)
   SellerDashboard.jsx  - Seller dashboard
-  TeamPortal.jsx       - Team review tool (split screen)
+  TeamPortal.jsx       - Team review tool (split screen spreadsheet)
   Chat.jsx             - Messaging
   ProductPage.jsx      - SEO product page (/p/{id})
   main.jsx             - Path-based router
@@ -55,17 +55,34 @@ Desktop\sabaro-search\
 - normalizeSeller() maps API fields to component fields
 - useIsMobile() hook, breakpoint 768px
 - allSellers = hardcoded mock sellers (fallback)
+- SellerProfileScreen fetches real products via GET /sellers/{id} on mount
+- Products tab shows real products from API with image, description, price, MOQ
 
 ## SellerDashboard.jsx Key Patterns
-- Login: WhatsApp lookup only, stored in localStorage as sabaro_seller
+- Login: WhatsApp + password (no real verification), stored in localStorage as sabaro_seller
 - Tabs: Home, Bookings, Products, Catalogue, Profile
-- CatalogueUpload: two API calls (save record + AI extract)
-- sellerIndustry = seller.category passed to CatalogueUpload
+- CatalogueUpload: saves record ONLY (no AI extraction) — two separate FormData calls
+- CatalogueTab: shows upload form + list of uploaded catalogues with status
+- Products show with View → link to /p/{id}
+- sellerIndustry = seller.category passed as prop
 
 ## TeamPortal.jsx Key Patterns
-- Login: WhatsApp → team_members table, stored as sabaro_team
-- PDF.js renders pages as canvas, click+drag to crop image
-- POST /team/products → product goes live immediately
+- Login: WhatsApp → team_members table, stored as sabaro_team in localStorage
+- Kapil's number: 9800000000 (admin)
+- Views: TeamLogin → CatalogueList → SplitScreenTool
+- SplitScreenTool is a SPREADSHEET with:
+  - LEFT: PDF rendered via PDF.js canvas
+    IMPORTANT: Must fetch(url) → arrayBuffer → pdfjsLib.getDocument({data:arrayBuffer}) to avoid QUIC error
+  - RIGHT: Spreadsheet table — one row per product variant
+  - Catalogue defaults bar at top: industry, brand, category, certifications, country, unit
+  - INDUSTRY_COLUMNS map — columns change based on industry selected
+  - Active row (◉): click to set, cropped image goes to active row
+  - ⊕ button: duplicate row (resets _saved, _saving, _generating, _product_id)
+  - Save button per row → POST /team/products → live immediately
+  - Save All button → saves all unsaved rows with product_name
+  - After save: URL → and ✨ AI buttons appear
+  - AI summary: calls Anthropic API (claude-sonnet-4-20250514), updates description field
+  - emptyRow(defaults) function creates new row with shared defaults
 
 ## Chat.jsx
 - Imported in App.jsx: import ChatScreen from "./Chat.jsx"
@@ -73,22 +90,23 @@ Desktop\sabaro-search\
 
 ## API Endpoints (api.py)
 GET  /sellers
-POST /search
+GET  /sellers/{id}                    ← explicit columns, NO search_text/embedding
+GET  /sellers/{id}/dashboard          ← explicit columns, NO search_text/embedding
 POST /sellers/register
 POST /sellers/login
-GET  /sellers/{id}/dashboard      ← explicit columns only, NO search_text or embedding
 PATCH /sellers/{id}
-POST /sellers/{id}/products
-PATCH /products/{id}
+POST /sellers/{id}/products           ← manual add with embedding
+PATCH /products/{id}                  ← update + re-embed
 DELETE /products/{id}
-GET  /products/{id}
-POST /sellers/{id}/catalogue      ← AI extraction
-POST /sellers/{id}/catalogues     ← save record
-GET  /sellers/{id}/catalogues
+GET  /products/{id}                   ← for SEO product page
+POST /sellers/{id}/catalogue          ← AI extraction (kept but not used in seller dashboard)
+POST /sellers/{id}/catalogues         ← save catalogue record to DB + Supabase storage
+GET  /sellers/{id}/catalogues         ← list catalogues for seller
+POST /search                          ← AI semantic search
 GET  /team/login/{whatsapp}
-GET  /team/catalogues
-POST /team/products
-POST /team/products/temp/image
+GET  /team/catalogues                 ← all catalogues for team queue
+POST /team/products                   ← add product, goes live immediately with embedding
+POST /team/products/temp/image        ← upload product image
 POST /conversations/start
 GET  /conversations/buyer/{phone}
 GET  /conversations/{id}/messages
@@ -98,6 +116,16 @@ POST /bookings
 POST /bookings/{id}/confirm
 
 CRITICAL: Never SELECT search_text or embedding — causes JSON serialization error.
+Always use explicit column list for products queries.
+
+## Route Order in api.py (IMPORTANT)
+FastAPI matches routes in order. These must appear BEFORE @app.get("/sellers/{seller_id}"):
+- @app.post("/sellers/register")
+- @app.post("/sellers/login")
+- @app.get("/sellers/{seller_id}/dashboard")
+- @app.post("/sellers/{seller_id}/catalogue")
+- @app.post("/sellers/{seller_id}/catalogues")
+- @app.get("/sellers/{seller_id}/catalogues")
 
 ## Database Tables
 sellers, products, bookings, conversations, messages, catalogues, team_members
@@ -108,40 +136,69 @@ products columns:
     use_cases, suitable_for, certifications, country_of_origin, unit_of_measure,
     min_order, price_per_unit, image_url
   Search: tags(jsonb [{key,value}]), embedding(vector 1536), search_text(tsvector generated)
-  Meta: status, added_by, catalogue_id, created_at
+  Meta: id, seller_id, catalogue_id, status(live/pending_review), added_by, created_at
 
-Search indexes: products_fts_idx (gin/search_text), products_tags_idx (gin/tags), pgvector
+catalogues: id, seller_id, file_name, file_url, status(uploaded/done), products_extracted, created_at
+team_members: id, name, whatsapp, role — Kapil: 9800000000, admin
 
 ## Search
 Current: embed query → search_products() RPC → rank by (similarity×0.5 + trust×0.5)
 TODO: 3-layer search (keyword FTS + tags filter + semantic vector)
+Indexes: products_fts_idx (gin/search_text), products_tags_idx (gin/tags), pgvector
 
 ## Trust Score
 HIGH TRUST 80+, MEDIUM TRUST 60-79, BUILDING TRUST <60
 final_score = (similarity × 0.5) + (trust_score/100 × 0.5)
 
 ## Deployment
-Frontend: cd Desktop\sabaro-app → git add -A → git commit → git push --force
-Backend:  cd Desktop\sabaro-search → git add . → git commit → git push
+Frontend: cd Desktop\sabaro-app → git add -A → git commit -m "msg" → git push --force
+Backend:  cd Desktop\sabaro-search → git add . → git commit -m "msg" → git push
 
 ## Known Issues
 1. Render sleeps after 15 min — wake at https://sabaro-api.onrender.com/
 2. Frontend needs git push --force (history rewrite)
-3. Never use SELECT * on products — search_text/embedding break JSON
-4. Catalogue extracts only 7-15 of 200+ products (chunking not implemented)
-5. No real auth — WhatsApp lookup only
+3. NEVER use SELECT * on products — search_text/embedding break JSON
+4. Catalogue AI extracts only 7-15 of 200+ products (chunking not built)
+5. No real auth — WhatsApp lookup only, no password verification
 6. Open CORS — needs locking before production
+7. PDF.js needs fetch → arrayBuffer approach (QUIC protocol error otherwise)
 
 ## Build Status
-DONE: Buyer app, AI search, bookings (mock), seller registration,
-      seller dashboard, catalogue upload+AI, product edit modal,
-      team portal + split screen, chat, product schema
+DONE:
+- Buyer marketplace with AI semantic search
+- Booking flows: Sample, Inspection, Transport (mock Razorpay)
+- Seller registration (4-step)
+- Seller dashboard: trust, bookings, products, catalogue list, profile
+- Catalogue upload → storage + catalogues table (no AI, team reviews manually)
+- Team portal: login, catalogue queue, split-screen spreadsheet tool
+  - PDF.js canvas rendering with image crop
+  - Industry-specific columns
+  - Active row image assignment
+  - Duplicate row
+  - Save row/Save All → product goes live
+  - URL per product after save
+  - AI summary generation per product
+- Products appear on seller dashboard Products tab
+- Products appear on buyer app seller profile Products tab (fetched from API)
+- Product SEO page at /p/{id} — built
+- Chat/messaging
+- Product schema: 18 basic columns + tags jsonb + 3 search indexes in Supabase
 
-IN PROGRESS: Product SEO page, 3-layer search
+IN PROGRESS:
+- Product SEO page /p/{id} — needs end-to-end testing
+- 3-layer search (indexes ready, endpoint not updated)
 
-PENDING: WhatsApp (Twilio), buyer login, real Razorpay,
-         search history, quotes, API security
+PENDING:
+- WhatsApp notifications (Twilio)
+- Buyer login and account
+- Real Razorpay
+- Search history, quote requests
+- API security (CORS, auth tokens)
+- Render paid upgrade
+- Catalogue AI chunking for 200+ products
 
 ## Session Protocol
-- "start session" → Claude recaps where we left off
-- "end session" → Claude generates daily log
+- "start session" → upload CLAUDE.md, Claude recaps where we left off
+- "end session" → Claude generates daily progress log
+- "update CLAUDE.md" → Claude updates this file with latest progress
+- Full docs: Sabaro-Documentation.docx

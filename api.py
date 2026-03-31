@@ -738,6 +738,26 @@ async def upload_temp_image(file: UploadFile = File(...)):
     return {"image_url": url}
 
 
+@app.get("/team/catalogues/{catalogue_id}/products")
+def get_catalogue_products(catalogue_id: str):
+    """Get all products for a catalogue (for team portal pre-fill)"""
+    result = supabase.table("products").select(
+        "id, seller_id, catalogue_id, product_name, product_code, brand, series_name, "
+        "category, industry, description, material, color, dimensions, finish_grade, "
+        "use_cases, suitable_for, certifications, country_of_origin, unit_of_measure, "
+        "min_order, price_per_unit, image_url, tags, status, added_by"
+    ).eq("catalogue_id", catalogue_id).execute()
+    return {"products": result.data}
+
+
+@app.patch("/sellers/{seller_id}/catalogues/{catalogue_id}/status")
+def update_catalogue_status(seller_id: str, catalogue_id: str, body: dict):
+    """Mark catalogue as done"""
+    supabase.table("catalogues").update({"status": body.get("status", "done")}).eq("id", catalogue_id).execute()
+    return {"updated": True}
+
+
+
 @app.get("/products/{product_id}")
 def get_product(product_id: str):
     """Get single product with seller details"""
