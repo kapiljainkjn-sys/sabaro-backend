@@ -796,8 +796,18 @@ Use cases: {product.get('use_cases','')}
 
 @app.delete("/products/{product_id}")
 def delete_product(product_id: str):
-    """Delete a product"""
+    # Get catalogue_id before deleting
+    product = supabase.table("products").select("catalogue_id").eq("id", product_id).execute()
     supabase.table("products").delete().eq("id", product_id).execute()
+    # Decrement products_extracted on the catalogue
+    if product.data and product.data[0].get("catalogue_id"):
+        cat_id = product.data[0]["catalogue_id"]
+        try:
+            cat = supabase.table("catalogues").select("products_extracted").eq("id", cat_id).execute()
+            if cat.data:
+                new_count = max(0, cat.data[0]["products_extracted"] - 1)
+                supabase.table("catalogues").update({"products_extracted": new_count}).eq("id", cat_id).execute()
+        except:
+            pass
     return {"deleted": True}
-
 
