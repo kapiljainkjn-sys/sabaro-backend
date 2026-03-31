@@ -46,9 +46,26 @@ def root():
 
 @app.get("/sellers")
 def get_sellers():
-    """Get all sellers"""
-    result = supabase.table("sellers").select("*").execute()
-    return {"sellers": result.data}
+    from collections import defaultdict
+    sellers = supabase.table("sellers").select("*").execute()
+    if not sellers.data:
+        return {"sellers": []}
+
+    seller_ids = [s["id"] for s in sellers.data]
+
+    products_result = supabase.table("products").select(
+        "id, seller_id, product_name, image_url, price_per_unit, min_order, unit_of_measure, category"
+    ).in_("seller_id", seller_ids).eq("status", "live").execute()
+
+    products_by_seller = defaultdict(list)
+    for p in (products_result.data or []):
+        if len(products_by_seller[p["seller_id"]]) < 6:
+            products_by_seller[p["seller_id"]].append(p)
+
+    for s in sellers.data:
+        s["top_products"] = products_by_seller.get(s["id"], [])
+
+    return {"sellers": sellers.data}
 
 
 class SearchRequest(BaseModel):
@@ -102,6 +119,26 @@ def search(req: SearchRequest):
         })
 
     ranked.sort(key=lambda x: x["final_score"], reverse=True)
+
+    # Attach top products, matched product first
+    if ranked:
+        from collections import defaultdict
+        ranked_ids = [r["id"] for r in ranked]
+        prod_res = supabase.table("products").select(
+            "id, seller_id, product_name, image_url, price_per_unit, min_order, unit_of_measure, category"
+        ).in_("seller_id", ranked_ids).eq("status", "live").execute()
+
+        prods_by_seller = defaultdict(list)
+        for p in (prod_res.data or []):
+            if len(prods_by_seller[p["seller_id"]]) < 6:
+                prods_by_seller[p["seller_id"]].append(p)
+
+        for r in ranked:
+            seller_prods = list(prods_by_seller.get(r["id"], []))
+            matched = r.get("matched_product", "")
+            if matched:
+                seller_prods.sort(key=lambda p: 0 if p["product_name"] == matched else 1)
+            r["top_products"] = seller_prods
 
     return {
         "query": req.query,
@@ -810,4 +847,28 @@ def delete_product(product_id: str):
         except:
             pass
     return {"deleted": True}
+
+@app.post("/team/ai-summary")
+async def ai_summary(body: dict):
+    """Proxy for Anthropic AI summary generation"""
+    row = body.get("row", {})
+    prompt = f"""Write a 2-3 sentence product description for a B2B marketplace listing. Be specific and professional.
+Name: {row.get('product_name','')}
+Brand: {row.get('brand','')}
+Industry: {row.get('industry','')}
+Category: {row.get('category','')}
+Material: {row.get('material','')}
+Color: {row.get('color','')}
+Dimensions: {row.get('dimensions','')}
+Certifications: {row.get('certifications','')}
+Price: {row.get('price_per_unit','')} per {row.get('unit_of_measure','')}
+MOQ: {row.get('min_order','')}
+Extra: {row.get('finish_grade','')} {row.get('use_cases','')}
+Return only the description, no preamble."""
+
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return {"summary": response.choices[0].message.content.strip()}
 
