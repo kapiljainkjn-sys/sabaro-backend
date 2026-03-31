@@ -55,7 +55,7 @@ def get_sellers():
 
     products_result = supabase.table("products").select(
         "id, seller_id, product_name, image_url, price_per_unit, min_order, unit_of_measure, category"
-    ).in_("seller_id", seller_ids).eq("status", "live").execute()
+    ).in_("seller_id", seller_ids).execute()
 
     products_by_seller = defaultdict(list)
     for p in (products_result.data or []):
