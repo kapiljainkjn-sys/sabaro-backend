@@ -312,6 +312,36 @@ Certifications: {product.get('certifications','')}
 
 
 
+@app.post("/sellers/{seller_id}/catalogues")
+async def save_catalogue(
+    seller_id: str,
+    file: UploadFile = File(...),
+    industry: str = Form("")
+):
+    """Save catalogue PDF to storage and create catalogue record"""
+    content = await file.read()
+    
+    # Upload PDF to Supabase storage
+    file_path = f"catalogues/{seller_id}/{file.filename}"
+    try:
+        supabase.storage.from_("chat-files").upload(
+            file_path, content,
+            {"content-type": "application/pdf", "upsert": "true"}
+        )
+        file_url = supabase.storage.from_("chat-files").get_public_url(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage error: {str(e)}")
+
+    # Create catalogue record
+    result = supabase.table("catalogues").insert({
+        "seller_id": seller_id,
+        "file_name": file.filename,
+        "file_url": file_url,
+        "status": "uploaded",
+    }).execute()
+
+    return {"catalogue": result.data[0]}
+
 
 @app.get("/sellers/{seller_id}")
 def get_seller(seller_id: str):
@@ -597,35 +627,6 @@ async def upload_chat_file(
 
 # ── CATALOGUE MANAGEMENT ───────────────────────────────────────────────────────
 
-@app.post("/sellers/{seller_id}/catalogues")
-async def save_catalogue(
-    seller_id: str,
-    file: UploadFile = File(...),
-    industry: str = Form("")
-):
-    """Save catalogue PDF to storage and create catalogue record"""
-    content = await file.read()
-    
-    # Upload PDF to Supabase storage
-    file_path = f"catalogues/{seller_id}/{file.filename}"
-    try:
-        supabase.storage.from_("chat-files").upload(
-            file_path, content,
-            {"content-type": "application/pdf", "upsert": "true"}
-        )
-        file_url = supabase.storage.from_("chat-files").get_public_url(file_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Storage error: {str(e)}")
-
-    # Create catalogue record
-    result = supabase.table("catalogues").insert({
-        "seller_id": seller_id,
-        "file_name": file.filename,
-        "file_url": file_url,
-        "status": "uploaded",
-    }).execute()
-
-    return {"catalogue": result.data[0]}
 
 
 @app.get("/sellers/{seller_id}/catalogues")
