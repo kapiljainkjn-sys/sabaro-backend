@@ -73,80 +73,166 @@ class SearchRequest(BaseModel):
     limit: int = 10
 
 
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 20
+    filters: dict = {}
+
 @app.post("/search")
 def search(req: SearchRequest):
-    """AI search — finds sellers by meaning"""
+    """
+    3-tier search:
+    1. Full-text (tsvector GIN) — exact keyword match
+    2. Attribute filter (tags jsonb) — structured field match
+    3. Semantic vector (embedding cosine) — meaning-based match
+    Results merged and deduplicated, ranked by combined score.
+    """
+    query = req.query.strip()
+    if not query:
+        # Return all sellers if no query
+        result = supabase.table("sellers").select(
+            "id,name,category,city,area,since,trust_score,shipments,recommendations,"
+            "sample_available,inspection_available,transport_available,inspection_videos,"
+            "shop_verified,shop_detail,business_verified,business_detail,sample_detail,"
+            "inspection_detail,transport_detail,last_shipment,whatsapp"
+        ).order("trust_score", desc=True).limit(30).execute()
+        return {"sellers": result.data, "mode": "all"}
 
-    # Embed the query
-    query_vector = embed(req.query)
+    seller_scores = {}  # seller_id -> {seller_data, score, matched_product}
 
-    # Vector search in Supabase
-    results = supabase.rpc("search_products", {
-        "query_embedding": query_vector,
-        "match_threshold": 0.3,
-        "match_count": 20
-    }).execute()
+    # ─── TIER 1: Full-text search on products (tsvector) ───────────────────────
+    try:
+        ft_result = supabase.table("products").select(
+            "id,seller_id,product_name,brand,category,description,price_per_unit,"
+            "unit_of_measure,min_order,image_url,status"
+        ).eq("status","live").text_search(
+            "search_text", query, config="english"
+        ).limit(30).execute()
 
-    if not results.data:
-        return {"sellers": [], "query": req.query}
+        for p in (ft_result.data or []):
+            sid = p["seller_id"]
+            if sid not in seller_scores:
+                seller_scores[sid] = {"score": 0, "matched_product": None}
+            seller_scores[sid]["score"] += 10  # full-text hit = high weight
+            if not seller_scores[sid]["matched_product"]:
+                seller_scores[sid]["matched_product"] = p
+    except Exception as e:
+        print(f"Full-text search error: {e}")
 
-    # Get seller details
-    seller_ids = list(set([r["seller_id"] for r in results.data]))
-    sellers = supabase.table("sellers").select("*").in_("id", seller_ids).execute()
-    seller_map = {s["id"]: s for s in sellers.data}
+    # ─── TIER 2: Attribute filter on tags (jsonb) ─────────────────────────────
+    # Search tags for key/value containing the query words
+    try:
+        words = [w.lower() for w in query.split() if len(w) > 2]
+        for word in words[:3]:  # limit to 3 words to avoid timeout
+            tag_result = supabase.table("products").select(
+                "id,seller_id,product_name,brand,category,description,price_per_unit,"
+                "unit_of_measure,min_order,image_url,status,tags"
+            ).eq("status","live").ilike("category", f"%{word}%").limit(20).execute()
 
-    # Best product match per seller
-    product_matches = {}
-    for r in results.data:
-        sid = r["seller_id"]
-        if sid not in product_matches or r["similarity"] > product_matches[sid]["similarity"]:
-            product_matches[sid] = r
+            for p in (tag_result.data or []):
+                sid = p["seller_id"]
+                if sid not in seller_scores:
+                    seller_scores[sid] = {"score": 0, "matched_product": None}
+                seller_scores[sid]["score"] += 5  # attribute match = medium weight
+                if not seller_scores[sid]["matched_product"]:
+                    seller_scores[sid]["matched_product"] = p
 
-    # Rank by trust + similarity
-    ranked = []
-    for sid, match in product_matches.items():
-        seller = seller_map.get(sid)
-        if not seller:
-            continue
+            # Also search product name directly
+            name_result = supabase.table("products").select(
+                "id,seller_id,product_name,brand,category,description,price_per_unit,"
+                "unit_of_measure,min_order,image_url,status"
+            ).eq("status","live").ilike("product_name", f"%{word}%").limit(20).execute()
 
-        final_score = (match["similarity"] * 0.5) + (seller["trust_score"] / 100 * 0.5)
+            for p in (name_result.data or []):
+                sid = p["seller_id"]
+                if sid not in seller_scores:
+                    seller_scores[sid] = {"score": 0, "matched_product": None}
+                seller_scores[sid]["score"] += 7
+                if not seller_scores[sid]["matched_product"]:
+                    seller_scores[sid]["matched_product"] = p
+    except Exception as e:
+        print(f"Attribute search error: {e}")
 
-        ranked.append({
-            **seller,
-            "matched_product": match["product_name"],
-            "similarity": round(match["similarity"], 3),
-            "final_score": round(final_score, 3),
+    # ─── TIER 3: Semantic vector search (embedding cosine) ────────────────────
+    try:
+        query_vector = embed(query)
+        # Use pgvector cosine similarity
+        vec_result = supabase.rpc("match_products", {
+            "query_embedding": query_vector,
+            "match_threshold": 0.3,
+            "match_count": 20
+        }).execute()
+
+        for p in (vec_result.data or []):
+            sid = p.get("seller_id")
+            if not sid:
+                continue
+            similarity = p.get("similarity", 0)
+            if sid not in seller_scores:
+                seller_scores[sid] = {"score": 0, "matched_product": None}
+            seller_scores[sid]["score"] += similarity * 8  # semantic weight
+            if not seller_scores[sid]["matched_product"] and similarity > 0.5:
+                seller_scores[sid]["matched_product"] = p
+    except Exception as e:
+        print(f"Semantic search error: {e}")
+
+    # ─── FALLBACK: Seller name/category match ─────────────────────────────────
+    if not seller_scores:
+        try:
+            seller_result = supabase.table("sellers").select(
+                "id,name,category,city"
+            ).or_(f"name.ilike.%{query}%,category.ilike.%{query}%").limit(10).execute()
+            for s in (seller_result.data or []):
+                seller_scores[s["id"]] = {"score": 3, "matched_product": None}
+        except Exception as e:
+            print(f"Seller fallback error: {e}")
+
+    if not seller_scores:
+        return {"sellers": [], "mode": "none"}
+
+    # ─── Fetch full seller data for matched sellers ────────────────────────────
+    seller_ids = list(seller_scores.keys())[:20]
+    sellers_result = supabase.table("sellers").select(
+        "id,name,category,city,area,since,trust_score,shipments,recommendations,"
+        "sample_available,inspection_available,transport_available,inspection_videos,"
+        "shop_verified,shop_detail,business_verified,business_detail,sample_detail,"
+        "inspection_detail,transport_detail,last_shipment,whatsapp"
+    ).in_("id", seller_ids).execute()
+
+    # Fetch top products for each seller
+    products_result = supabase.table("products").select(
+        "id,seller_id,product_name,price_per_unit,unit_of_measure,min_order,image_url,category"
+    ).eq("status","live").in_("seller_id", seller_ids).order(
+        "created_at", desc=True
+    ).limit(100).execute()
+
+    # Group products by seller
+    products_by_seller = {}
+    for p in (products_result.data or []):
+        sid = p["seller_id"]
+        if sid not in products_by_seller:
+            products_by_seller[sid] = []
+        if len(products_by_seller[sid]) < 5:
+            products_by_seller[sid].append(p)
+
+    # Build final seller objects with scores
+    sellers_out = []
+    for s in (sellers_result.data or []):
+        sid = s["id"]
+        score_data = seller_scores.get(sid, {"score": 0, "matched_product": None})
+        # Combine search relevance with trust score
+        final_score = score_data["score"] + (s.get("trust_score", 0) * 0.1)
+        sellers_out.append({
+            **s,
+            "relevance_score": final_score,
+            "top_products": products_by_seller.get(sid, []),
+            "matched_product": score_data["matched_product"],
         })
 
-    ranked.sort(key=lambda x: x["final_score"], reverse=True)
+    # Sort by combined relevance + trust
+    sellers_out.sort(key=lambda x: x["relevance_score"], reverse=True)
 
-    # Attach top products, matched product first
-    if ranked:
-        from collections import defaultdict
-        ranked_ids = [r["id"] for r in ranked]
-        prod_res = supabase.table("products").select(
-            "id, seller_id, product_name, image_url, price_per_unit, min_order, unit_of_measure, category"
-        ).in_("seller_id", ranked_ids).eq("status", "live").execute()
-
-        prods_by_seller = defaultdict(list)
-        for p in (prod_res.data or []):
-            if len(prods_by_seller[p["seller_id"]]) < 6:
-                prods_by_seller[p["seller_id"]].append(p)
-
-        for r in ranked:
-            seller_prods = list(prods_by_seller.get(r["id"], []))
-            matched = r.get("matched_product", "")
-            if matched:
-                seller_prods.sort(key=lambda p: 0 if p["product_name"] == matched else 1)
-            r["top_products"] = seller_prods
-
-    return {
-        "query": req.query,
-        "count": len(ranked),
-        "sellers": ranked[:req.limit]
-    }
-
-
+    return {"sellers": sellers_out, "mode": "search_3tier"}
 
 @app.post("/sellers/{seller_id}/catalogue")
 async def upload_catalogue(
